@@ -2498,6 +2498,25 @@ class AIAgent:
                 "is_anthropic_oauth": self._is_anthropic_oauth,
             })
 
+        # ── Elpis multi‑expert router ────────────────────────────────
+        self._elpis_router: Optional["ElpisRouter"] = None
+        self._elpis_enabled = False
+        try:
+            import sys
+            _agent_dir = os.path.dirname(os.path.abspath(__file__))
+            _elpis_dir = os.path.join(_agent_dir, "..")
+            if _elpis_dir not in sys.path:
+                sys.path.insert(0, _elpis_dir)
+            from elpis.router import ElpisRouter
+            self._elpis_router = ElpisRouter()
+            if self._elpis_router.has_model:
+                self._elpis_enabled = True
+                if not self.quiet_mode:
+                    print("🧭 Elpis router activated (local expert routing)")
+        except Exception:
+            pass  # Elpis unavailable – degrades to normal API call
+        # ─────────────────────────────────────────────────────────────────
+
     def _get_session_db_for_recall(self):
         """Return a SessionDB for recall, lazily creating it if an entrypoint forgot.
 
@@ -7497,6 +7516,51 @@ class AIAgent:
         the main retry loop can try again with backoff / credential rotation /
         provider fallback.
         """
+        # ── Elpis routing interception ────────────────────────────────
+        if (
+            self._elpis_enabled
+            and self._elpis_router is not None
+            and self._api_call_count <= 1  # only first API call per turn
+        ):
+            user_prompt = None
+            messages = api_kwargs.get("messages", [])
+            for msg in reversed(messages):
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+                if role == "user" and isinstance(content, str) and content.strip():
+                    user_prompt = content.strip()
+                    break
+
+            if user_prompt:
+                try:
+                    response_text = self._elpis_router.route(
+                        user_prompt,
+                        max_tokens=api_kwargs.get("max_tokens", 256),
+                        temperature=api_kwargs.get("temperature", 0.7),
+                    )
+                    if not response_text.startswith("[Elpis]"):
+                        return SimpleNamespace(
+                            choices=[SimpleNamespace(
+                                finish_reason="stop",
+                                index=0,
+                                message=SimpleNamespace(
+                                    content=response_text,
+                                    role="assistant",
+                                    tool_calls=[],
+                                ),
+                            )],
+                            model=getattr(self, "model", ""),
+                            usage=SimpleNamespace(
+                                prompt_tokens=0,
+                                completion_tokens=0,
+                                total_tokens=0,
+                            ),
+                        )
+                except Exception as exc:
+                    logger.debug("Elpis routing failed, falling through to API: %s", exc)
+        # ─────────────────────────────────────────────────────────────────
         result = {"response": None, "error": None}
         request_client_holder = {"client": None}
 
@@ -7821,6 +7885,51 @@ class AIAgent:
         """
         if self._interrupt_requested:
             raise InterruptedError("Agent interrupted before streaming API call")
+        # ── Elpis routing interception ────────────────────────────────
+        if (
+            self._elpis_enabled
+            and self._elpis_router is not None
+            and self._api_call_count <= 1  # only first API call per turn
+        ):
+            user_prompt = None
+            messages = api_kwargs.get("messages", [])
+            for msg in reversed(messages):
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+                if role == "user" and isinstance(content, str) and content.strip():
+                    user_prompt = content.strip()
+                    break
+
+            if user_prompt:
+                try:
+                    response_text = self._elpis_router.route(
+                        user_prompt,
+                        max_tokens=api_kwargs.get("max_tokens", 256),
+                        temperature=api_kwargs.get("temperature", 0.7),
+                    )
+                    if not response_text.startswith("[Elpis]"):
+                        return SimpleNamespace(
+                            choices=[SimpleNamespace(
+                                finish_reason="stop",
+                                index=0,
+                                message=SimpleNamespace(
+                                    content=response_text,
+                                    role="assistant",
+                                    tool_calls=[],
+                                ),
+                            )],
+                            model=getattr(self, "model", ""),
+                            usage=SimpleNamespace(
+                                prompt_tokens=0,
+                                completion_tokens=0,
+                                total_tokens=0,
+                            ),
+                        )
+                except Exception as exc:
+                    logger.debug("Elpis routing failed, falling through to API: %s", exc)
+        # ─────────────────────────────────────────────────────────────────
 
         if self.api_mode == "codex_responses":
             # Codex streams internally via _run_codex_stream. The main dispatch
