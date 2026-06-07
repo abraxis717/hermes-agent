@@ -1,6 +1,5 @@
 """Tests for the provider module registry and profiles."""
 
-import pytest
 from providers import get_provider_profile, _REGISTRY
 from providers.base import ProviderProfile, OMIT_TEMPERATURE
 
@@ -42,6 +41,10 @@ class TestNvidiaProfile:
         p = get_provider_profile("nvidia")
         assert "nvidia.com" in p.base_url
 
+    def test_billing_header_not_profile_wide(self):
+        p = get_provider_profile("nvidia")
+        assert p.default_headers == {}
+
 
 class TestKimiProfile:
     def test_temperature_omit(self):
@@ -65,10 +68,12 @@ class TestKimiProfile:
         assert kimi.base_url != cn.base_url
 
     def test_thinking_enabled(self):
+        # xor contract (fix ce4e74b3): an explicit recognized effort sends
+        # reasoning_effort ONLY — never paired with extra_body.thinking.
         p = get_provider_profile("kimi")
         eb, tl = p.build_api_kwargs_extras(reasoning_config={"enabled": True, "effort": "high"})
-        assert eb["thinking"] == {"type": "enabled"}
         assert tl["reasoning_effort"] == "high"
+        assert "thinking" not in eb
 
     def test_thinking_disabled(self):
         p = get_provider_profile("kimi")
@@ -77,15 +82,18 @@ class TestKimiProfile:
         assert "reasoning_effort" not in tl
 
     def test_reasoning_effort_default(self):
+        # enabled with no effort → thinking toggle only, no top-level effort.
         p = get_provider_profile("kimi")
         eb, tl = p.build_api_kwargs_extras(reasoning_config={"enabled": True})
-        assert tl["reasoning_effort"] == "medium"
+        assert eb["thinking"] == {"type": "enabled"}
+        assert "reasoning_effort" not in tl
 
     def test_no_config_defaults(self):
+        # No reasoning_config → thinking on, server picks depth; no effort.
         p = get_provider_profile("kimi")
         eb, tl = p.build_api_kwargs_extras(reasoning_config=None)
         assert eb["thinking"] == {"type": "enabled"}
-        assert tl["reasoning_effort"] == "medium"
+        assert "reasoning_effort" not in tl
 
 
 class TestOpenRouterProfile:
@@ -93,6 +101,11 @@ class TestOpenRouterProfile:
         p = get_provider_profile("openrouter")
         body = p.build_extra_body(provider_preferences={"allow": ["anthropic"]})
         assert body["provider"] == {"allow": ["anthropic"]}
+
+    def test_extra_body_session_id(self):
+        p = get_provider_profile("openrouter")
+        body = p.build_extra_body(session_id="test-session-123")
+        assert body["session_id"] == "test-session-123"
 
     def test_extra_body_no_prefs(self):
         p = get_provider_profile("openrouter")
@@ -210,9 +223,10 @@ class TestOpenRouterProfile:
 
 class TestNousProfile:
     def test_tags(self):
+        from agent.portal_tags import nous_portal_tags
         p = get_provider_profile("nous")
         body = p.build_extra_body()
-        assert body["tags"] == ["product=hermes-agent"]
+        assert body["tags"] == nous_portal_tags()
 
     def test_auth_type(self):
         p = get_provider_profile("nous")
